@@ -67,17 +67,14 @@ if echo "$CHOICES" | grep -q "BASE"; then
   echo "→ Installation de duf..."
   apt-get install -y duf
 
-
   echo "→ Installation de fastfetch..."
-apt-get install -y fastfetch
-
-# Fastfetch au login bash et SSH
-if ! grep -q "fastfetch" ~/.bashrc; then
-  echo "fastfetch" >> ~/.bashrc
-fi
-if ! grep -q "fastfetch" ~/.bash_profile; then
-  echo "fastfetch" >> ~/.bash_profile
-fi
+  apt-get install -y fastfetch
+  if ! grep -q "fastfetch" ~/.bashrc; then
+    echo "fastfetch" >> ~/.bashrc
+  fi
+  if ! grep -q "fastfetch" ~/.bash_profile; then
+    echo "fastfetch" >> ~/.bash_profile
+  fi
 
   echo "✔ Outils de base installés."
 fi
@@ -117,15 +114,20 @@ fi
 # ── MODULE : Fish + Fisher ────────────────
 if echo "$CHOICES" | grep -q "FISH"; then
   echo ""
-  echo "── [FISH] Fish shell + Fisher + plugins "
+  echo "── [FISH] Fish shell + Fisher + plugins ──"
 
   apt-get install -y fish
 
-  echo "→ Installation de Fisher..."
-  fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher"
+  # Script fish temporaire pour éviter les conflits avec bash
+  cat > /tmp/fisher_setup.fish << 'EOF'
+curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source
+fisher install jorgebucaran/fisher
+fisher install edc/bass
+EOF
 
-  echo "→ Installation du plugin bass..."
-  fish -c "fisher install edc/bass"
+  echo "→ Installation de Fisher + plugins..."
+  fish /tmp/fisher_setup.fish
+  rm /tmp/fisher_setup.fish
 
   # Fish comme shell par défaut (optionnel)
   FISH_PATH=$(which fish)
