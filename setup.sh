@@ -67,6 +67,18 @@ if echo "$CHOICES" | grep -q "BASE"; then
   echo "→ Installation de duf..."
   apt-get install -y duf
 
+
+  echo "→ Installation de fastfetch..."
+apt-get install -y fastfetch
+
+# Fastfetch au login bash et SSH
+if ! grep -q "fastfetch" ~/.bashrc; then
+  echo "fastfetch" >> ~/.bashrc
+fi
+if ! grep -q "fastfetch" ~/.bash_profile; then
+  echo "fastfetch" >> ~/.bash_profile
+fi
+
   echo "✔ Outils de base installés."
 fi
 
