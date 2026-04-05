@@ -69,12 +69,8 @@ if echo "$CHOICES" | grep -q "BASE"; then
 
   echo "→ Installation de fastfetch..."
   apt-get install -y fastfetch
-  if ! grep -q "fastfetch" ~/.bashrc; then
-    echo "fastfetch" >> ~/.bashrc
-  fi
-  if ! grep -q "fastfetch" ~/.bash_profile; then
-    echo "fastfetch" >> ~/.bash_profile
-  fi
+  echo "fastfetch" > /etc/profile.d/fastfetch.sh
+  chmod +x /etc/profile.d/fastfetch.sh
 
   echo "→ Installation de ncdu..."
   apt-get install -y ncdu
@@ -86,7 +82,6 @@ if echo "$CHOICES" | grep -q "BASE"; then
   apt-get install -y fail2ban
   systemctl enable fail2ban
   systemctl start fail2ban
-
 
 
   echo "✔ Outils de base installés."
