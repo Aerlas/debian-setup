@@ -76,6 +76,19 @@ if echo "$CHOICES" | grep -q "BASE"; then
     echo "fastfetch" >> ~/.bash_profile
   fi
 
+  echo "→ Installation de ncdu..."
+  apt-get install -y ncdu
+  
+  echo "→ Installation de sysstat..."
+  apt-get install -y sysstat
+  
+  echo "→ Installation de fail2ban..."
+  apt-get install -y fail2ban
+  systemctl enable fail2ban
+  systemctl start fail2ban
+
+
+
   echo "✔ Outils de base installés."
 fi
 
