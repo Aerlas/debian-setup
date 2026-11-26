@@ -43,18 +43,35 @@ echo "=== Exécution du $(date) ===" >> "$LOG"
 # ── Menu ──────────────────────────────────────────────────────────
 CHOICES=$(whiptail --title "Debian Bootstrap — convention homelab" \
   --checklist "\nModules à installer (ESPACE pour cocher, ENTRÉE pour valider) :" \
-  20 78 9 \
+  21 78 10 \
   "HOSTNAME"  "Nom de machine + protection cloud-init"           OFF \
-  "BASE"      "Outils de base + fail2ban + accueil fastfetch"    ON  \
+  "BASE"      "Outils de base, locale, fail2ban, accueil"        ON  \
   "ADMIN"     "Compte admin ${ADMIN_USER} + clé 1Password"       ON  \
   "BASH"      "Bash amélioré (ble.sh, fzf, complétion)"          ON  \
   "TAILSCALE" "Tailscale + résolution PatchMon"                  OFF \
   "DOCKER"    "Docker CE + Compose v2 + live-restore"            OFF \
   "HAWSER"    "Agent Hawser Edge (Dockhand)"                     OFF \
   "SSH"       "Convention SSH (port ${SSH_PORT}, clés, AllowUsers)" OFF \
+  "FIREWALL"  "Pare-feu SSH local nftables (sans pare-feu hébergeur)" OFF \
   3>&1 1>&2 2>&3) || { echo "Installation annulée."; exit 0; }
 
 has() { echo "$CHOICES" | grep -q "\"$1\""; }
+
+# Profil réseau (partagé par SSH et FIREWALL) : d'où Warpgate joint la machine
+PROFILE=""; FROM=""
+choose_profile() {
+  [ -n "$PROFILE" ] && return 0
+  PROFILE=$(whiptail --title "Profil de la machine" --radiolist \
+    "D'où Warpgate joint-il cette machine ?" 12 78 2 \
+    "VPS" "par Internet, depuis Styx (${STYX_IP})"            ON \
+    "LAN" "par le tailnet, via les routeurs (${LAN_ROUTERS})" OFF \
+    3>&1 1>&2 2>&3) || PROFILE=""
+  case "$PROFILE" in
+    VPS) FROM="$STYX_IP" ;;
+    LAN) FROM="$LAN_ROUTERS" ;;
+    *)   return 1 ;;
+  esac
+}
 
 echo ""
 echo "════════════════════════════════════════"
@@ -91,6 +108,14 @@ if has BASE; then
   apt-get install -y du-dust || warn "du-dust indisponible dans apt (ignoré)"
 
   systemctl enable --now fail2ban
+
+  # Locale en_US.UTF-8 : évite « setlocale: LC_ALL » quand le Mac transmet sa locale
+  apt-get install -y locales
+  if ! locale -a 2>/dev/null | grep -qi '^en_US\.utf-\?8$'; then
+    sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+    locale-gen
+    info "locale en_US.UTF-8 générée"
+  fi
 
   # Accueil : fastfetch seul, uniquement en session interactive
   cat > /etc/profile.d/fastfetch.sh <<'EOF'
@@ -316,18 +341,28 @@ if has SSH; then
   fi
 
   if [ "$SSH_OK" = 1 ]; then
-    PROFILE=$(whiptail --title "Profil de la machine" --radiolist \
-      "D'où Warpgate joint-il cette machine ?" 12 78 2 \
-      "VPS" "par Internet, depuis Styx (${STYX_IP})"          ON \
-      "LAN" "par le tailnet, via les routeurs (${LAN_ROUTERS})" OFF \
-      3>&1 1>&2 2>&3) || PROFILE=""
-    case "$PROFILE" in
-      VPS) FROM="$STYX_IP"; ALLOW="root@${STYX_IP} ${ADMIN_USER}@${TAILNET_NET}" ;;
-      LAN) FROM="$LAN_ROUTERS"
-           ALLOW="${ADMIN_USER}@${TAILNET_NET} ${ADMIN_USER}@${LAN_NET}"
-           for r in ${LAN_ROUTERS//,/ }; do ALLOW="root@${r} ${ALLOW}"; done ;;
-      *)   SSH_OK=0; warn "Aucun profil choisi : module SSH arrêté." ;;
-    esac
+    if choose_profile; then
+      # Sources autorisées pour un compte : Warpgate (Styx ou routeurs) + tailnet (+ LAN)
+      allow_for() {   # $1 = compte, $2 = warp | direct | both
+        local u="$1" out=() s
+        if [ "$2" != direct ]; then for s in ${FROM//,/ }; do out+=("${u}@${s}"); done; fi
+        if [ "$2" != warp ]; then
+          out+=("${u}@${TAILNET_NET}")
+          [ "$PROFILE" = "LAN" ] && out+=("${u}@${LAN_NET}")
+        fi
+        echo "${out[*]}"
+      }
+      ALLOW="$(allow_for root warp) $(allow_for "$ADMIN_USER" direct)"
+
+      # Comptes supplémentaires (ex. compte SFTP chrooté), joignables via Warpgate et le tailnet
+      EXTRA_USERS=$(ask "Comptes supplémentaires" \
+        "Autres comptes autorisés en SSH/SFTP (séparés par des espaces, vide si aucun).\nTout compte absent de cette liste sera refusé par AllowUsers." "") || EXTRA_USERS=""
+      for u in $EXTRA_USERS; do
+        if id "$u" &>/dev/null; then ALLOW+=" $(allow_for "$u" both)"; else warn "compte ${u} inexistant : ignoré"; fi
+      done
+    else
+      SSH_OK=0; warn "Aucun profil choisi : module SSH arrêté."
+    fi
   fi
 
   if [ "$SSH_OK" = 1 ]; then
@@ -371,18 +406,86 @@ EOF
 
     # 3. fail2ban sur le bon port (Debian 13 : backend systemd)
     if [ "$SSH_OK" = 1 ] && command -v fail2ban-client >/dev/null; then
-      printf '[sshd]\nport = %s\nbackend = systemd\n' "$SSH_PORT" > /etc/fail2ban/jail.d/sshd-homelab.local
+      # ignoreip : tout le trafic Warpgate arrive de la même IP ; quelques échecs
+      # (mot de passe SFTP mal saisi…) banniraient Warpgate et couperaient tous les accès.
+      rm -f /etc/fail2ban/jail.d/sshd-homelab.local
+      cat > /etc/fail2ban/jail.d/zz-homelab.local <<EOF
+# Convention homelab
+[sshd]
+enabled  = true
+port     = ${SSH_PORT}
+backend  = systemd
+ignoreip = 127.0.0.1/8 ${FROM//,/ }
+EOF
       systemctl restart fail2ban
+      fail2ban-client get sshd ignoreip | tee -a "$LOG" || true
     fi
 
     if [ "$SSH_OK" = 1 ]; then
       ok "Convention SSH appliquée."
       TODO+=("Warpgate : cible $(hostname -s) → utilisateur root, port ${SSH_PORT} (Check host key)")
       TODO+=("Tester : connexion via Warpgate (root) ET ssh -p ${SSH_PORT} ${ADMIN_USER}@<IP tailnet> (Proton coupé)")
-      [ "$PROFILE" = "VPS" ] && TODO+=("Pare-feu hébergeur : TCP ${SSH_PORT} depuis ${STYX_IP} uniquement, 22 fermé (OVH : règles Refuser explicites ; IONOS : liste d'autorisations)")
+      [ "$PROFILE" = "VPS" ] && ! has FIREWALL && TODO+=("Pare-feu hébergeur : TCP ${SSH_PORT} depuis ${STYX_IP} uniquement, 22 fermé (OVH : règles Refuser explicites ; IONOS : liste d'autorisations ; Kimsufi : aucun → relancer avec le module FIREWALL)")
       [ "$PROFILE" = "VPS" ] && TODO+=("Contrôle externe (Proton coupé) : Test-NetConnection <IP publique> -Port ${SSH_PORT} → False")
       [ -n "$KEEP22" ] && TODO+=("Après validation : sed -i '/^Port 22/d' ${CONF} && sshd -t && systemctl reload ssh")
       TODO+=("Verrouiller l'ancien compte par défaut (ex. debian) : usermod -L -s /usr/sbin/nologin <compte>")
+    fi
+  fi
+fi
+
+# ═══ MODULE : FIREWALL (nftables local, SSH uniquement) ════════════
+# Pour les hôtes sans pare-feu hébergeur (ex. Kimsufi). Table dédiée « inet homelab » :
+# JAMAIS de « flush ruleset », qui effacerait les règles de Docker, Tailscale et fail2ban.
+if has FIREWALL; then
+  log "[FIREWALL] Pare-feu SSH local (nftables)"
+  if ! choose_profile; then
+    warn "Aucun profil choisi : module FIREWALL ignoré."
+  else
+    NFT=/etc/nftables.conf
+    apt-get install -y nftables
+    FW_OK=1
+
+    # Le fichier Debian par défaut commence par « flush ruleset » : il est remplacé (sauvegarde conservée)
+    if [ -s "$NFT" ] && ! grep -q 'Convention homelab' "$NFT"; then
+      yesno "nftables" "${NFT} va être remplacé (sauvegarde conservée).\nSur une machine neuve, c'est le fichier Debian par défaut.\n\nContinuer ?" || FW_OK=0
+    fi
+
+    if [ "$FW_OK" = 1 ]; then
+      SRC=$(echo "${FROM//,/, }")
+      LAN_RULE=""
+      [ "$PROFILE" = "LAN" ] && LAN_RULE="        tcp dport \$ssh_ports ip saddr ${LAN_NET} accept   comment \"LAN\""
+      backup "$NFT"
+      cat > "$NFT" <<EOF
+#!/usr/sbin/nft -f
+# Convention homelab — filtrage SSH local (hôte sans pare-feu hébergeur)
+# PAS de « flush ruleset » : Docker, Tailscale et fail2ban gèrent leurs propres tables.
+# Le couple « table / delete table » rend le rechargement idempotent.
+define ssh_ports = { 22, ${SSH_PORT} }
+
+table inet homelab
+delete table inet homelab
+
+table inet homelab {
+    chain input {
+        type filter hook input priority filter; policy accept;
+        tcp dport \$ssh_ports iifname "tailscale0" accept   comment "tailnet"
+        tcp dport \$ssh_ports ip saddr { ${SRC} } accept   comment "Warpgate"
+${LAN_RULE}
+        tcp dport \$ssh_ports counter drop   comment "SSH fermé au reste d'internet"
+    }
+}
+EOF
+      sed -i '/^$/{N;/^\n$/D}' "$NFT"
+      if nft -c -f "$NFT"; then
+        nft -f "$NFT"
+        systemctl enable nftables   # rechargé au démarrage (fichier déjà sûr)
+        nft list table inet homelab | tee -a "$LOG"
+        ok "Pare-feu SSH local actif (les autres flux ne sont pas filtrés)."
+        TODO+=("Contrôle externe (Tailscale et Proton coupés) : nc -vz <IP publique> ${SSH_PORT} → timeout ; puis nft list chain inet homelab input (compteur drop > 0)")
+      else
+        warn "Règles nftables invalides : restauration du fichier précédent."
+        if [ -f "$NFT.bak-$TS" ]; then mv "$NFT.bak-$TS" "$NFT"; else rm -f "$NFT"; fi
+      fi
     fi
   fi
 fi
